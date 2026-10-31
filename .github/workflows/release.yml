@@ -1,0 +1,150 @@
+# Creates this repository's part of a RiaGraph release: a tag and a GitHub
+# release, or the reuse of a release or tag that already exists.
+#
+# cntSafety/RiaGraph's "Release (all repos)" workflow dispatches this file in
+# every component repository with the same tag, waits for the run, reads the
+# release-info artifact it leaves behind and links the result from the RiaGraph
+# release. That is why the run name carries the dispatch id and why the
+# artifact exists. Running it by hand works the same way.
+#
+# The file is identical in every component repository (RiaGraphExtensionDev,
+# RiaGraphBenchmarkDev, RiaGraphDatasetDev, RiaGraphJavaDev, RiaGraphNodejsDev,
+# RiaGraphPythonDev, RiaGraphRustDev, RiaGraphWasmDev, RiaGraphExplorerDev).
+# Change them together.
+#
+# What `ref` selects:
+#   empty                     a new `tag` on the head of the default branch
+#   a branch or commit SHA    a new `tag` on that commit
+#   a tag with a release      that release, left as it is
+#   a tag without a release   a new release on that tag, no new tag
+# A `tag` that already exists is reused rather than moved, so a rerun after a
+# partial failure picks up where the previous run stopped.
+name: Release
+
+run-name: Release ${{ inputs.tag }}${{ inputs.dispatch_id != '' && format(' [{0}]', inputs.dispatch_id) || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to create, e.g. v0.22.0 or v0.23.0-rc.1"
+        required: true
+        type: string
+      ref:
+        description: "Branch, SHA, tag or release tag to release (empty: default branch)"
+        required: false
+        default: ""
+        type: string
+      prerelease:
+        description: "Mark a newly created release as a prerelease"
+        required: false
+        default: true
+        type: boolean
+      parent_url:
+        description: "URL of the RiaGraphDev release this one belongs to"
+        required: false
+        default: ""
+        type: string
+      dispatch_id:
+        description: "Set by the RiaGraph release workflow to find this run"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "Resolve what would be released without creating anything"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the tag and the release
+    steps:
+      - name: Create or reuse the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          TAG: ${{ inputs.tag }}
+          REF: ${{ inputs.ref }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          PARENT_URL: ${{ inputs.parent_url }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if ! [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH[-suffix]"
+            exit 1
+          fi
+
+          tag_exists() { gh api "repos/$REPO/git/ref/tags/$1" --silent 2>/dev/null; }
+          release_exists() { gh release view "$1" -R "$REPO" --json tagName >/dev/null 2>&1; }
+          commit_of() {
+            gh api "repos/$REPO/commits/$1" --jq .sha 2>/dev/null ||
+              { echo "::error::'$1' is not a branch, tag or commit in $REPO" >&2; return 1; }
+          }
+
+          # A tag named in `ref` is released as itself; anything else names the
+          # commit the new tag goes on.
+          source_ref=${REF:-$DEFAULT_BRANCH}
+          if [ -n "$REF" ] && tag_exists "$REF"; then
+            tag=$REF
+            sha=$(commit_of "$REF")
+          else
+            tag=$TAG
+            sha=$(commit_of "$source_ref")
+            if tag_exists "$tag"; then
+              tagged=$(commit_of "$tag")
+              if [ "$tagged" != "$sha" ]; then
+                echo "::warning::$tag already exists on ${tagged:0:12}, not on ${sha:0:12} ($source_ref); reusing the existing tag"
+              fi
+              sha=$tagged
+            fi
+          fi
+
+          if release_exists "$tag"; then
+            source=existing-release
+          elif tag_exists "$tag"; then
+            source=existing-tag
+          else
+            source=new
+          fi
+
+          notes="Source: \`$source_ref\` at $sha."
+          if [ -n "$PARENT_URL" ]; then
+            notes="Released together with RiaGraphDev: $PARENT_URL"$'\n\n'"$notes"
+          fi
+          flags=(--title "${REPO#*/} $tag" --notes "$notes")
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+
+          if [ "$DRY_RUN" = true ]; then
+            url="https://github.com/$REPO/releases/tag/$tag"
+            prerelease=$PRERELEASE
+          else
+            case $source in
+              new)          gh release create "$tag" -R "$REPO" --target "$sha" "${flags[@]}" ;;
+              existing-tag) gh release create "$tag" -R "$REPO" --verify-tag "${flags[@]}" ;;
+            esac
+            url=$(gh release view "$tag" -R "$REPO" --json url --jq .url)
+            prerelease=$(gh release view "$tag" -R "$REPO" --json isPrerelease --jq .isPrerelease)
+          fi
+
+          jq -n --arg repo "$REPO" --arg tag "$tag" --arg sha "$sha" --arg url "$url" \
+                --arg source "$source" --argjson prerelease "$prerelease" --argjson dry_run "$DRY_RUN" \
+                '{repo: $repo, tag: $tag, sha: $sha, url: $url, source: $source, prerelease: $prerelease, dry_run: $dry_run}' \
+                > release-info.json
+          cat release-info.json
+          echo "${REPO#*/} [$tag]($url) at \`${sha:0:12}\` ($source$([ "$DRY_RUN" = true ] && echo ', dry run'))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Hand the result to the RiaGraph release workflow
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-info
+          path: release-info.json
+          retention-days: 7
