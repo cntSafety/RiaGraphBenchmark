@@ -6,13 +6,13 @@ import shutil
 import subprocess
 import sys
 
-from version import _get_lbug_version
+from version import _get_riag_version
 
 base_dir = os.path.dirname(os.path.realpath(__file__))
 
-def serialize(lbug_exec_path, dataset_name, dataset_path, serialized_graph_path, benchmark_copy_log_dir,
+def serialize(riag_exec_path, dataset_name, dataset_path, serialized_graph_path, benchmark_copy_log_dir,
               single_thread: bool = False):
-    bin_version = _get_lbug_version()
+    bin_version = _get_riag_version()
 
     if os.path.exists(os.path.join(serialized_graph_path, 'version.txt')):
         with open(os.path.join(serialized_graph_path, 'version.txt'), encoding="utf-8") as f:
@@ -63,11 +63,12 @@ def serialize(lbug_exec_path, dataset_name, dataset_path, serialized_graph_path,
         logging.info('Executing query: %s', s)
         create_match = re.match(r'create\s+(.+?)\s+table\s+(.+?)\s*\(', s, re.IGNORECASE)
         copy_match = re.match(r'copy\s+(.+?)\s+from', s, re.IGNORECASE)
-        # Run lbug shell one query at a time. This ensures a new process is
+        # Run the riag shell one query at a time. This ensures a new process is
         # created for each query to avoid memory leaks.
         stdout = sys.stdout if create_match or not benchmark_copy_log_dir else subprocess.PIPE
-        db_path = os.path.join(serialized_graph_path, 'db.lbdb')
-        process = subprocess.Popen([lbug_exec_path, db_path],
+        # RiaGraph's test runner opens the serialized dataset as db.riag (TESTING_DB_FILE_NAME).
+        db_path = os.path.join(serialized_graph_path, 'db.riag')
+        process = subprocess.Popen([riag_exec_path, db_path],
                                    stdin=subprocess.PIPE, stdout=stdout, encoding="utf-8")
         process.stdin.write(s)
         process.stdin.close()
@@ -96,7 +97,7 @@ def serialize(lbug_exec_path, dataset_name, dataset_path, serialized_graph_path,
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
-    parser = argparse.ArgumentParser(description='Serializes dataset to a lbug database')
+    parser = argparse.ArgumentParser(description='Serializes dataset to a RiaGraph database')
     parser.add_argument("dataset_name", help="Name of the dataset for display purposes")
     parser.add_argument("dataset_path", help="Input path of the dataset to serialize")
     parser.add_argument("serialized_graph_path",
@@ -105,30 +106,25 @@ if __name__ == '__main__':
     parser.add_argument("--single-thread",
                         help="If true, copy single threaded, which makes the results more reproducible",
                         action="store_true")
-    parser.add_argument("--lbug-shell-mode",
+    # --lbug-shell-mode and --lbug-shell are the names before the rename, kept as aliases.
+    parser.add_argument("--riag-shell-mode", "--lbug-shell-mode", dest="riag_shell_mode",
                         help="debug, release or relwithdebinfo",
                         default="release")
     default_mode = "release"
-    if sys.platform == "win32":
-        default_lbug_exec_path = os.path.join(
-            base_dir, '..', 'build', default_mode, 'tools', 'shell', 'lbug_shell')
-    else:
-        default_lbug_exec_path = os.path.join(
-            base_dir, '..', 'build', default_mode, 'tools', 'shell', 'lbug')
-    parser.add_argument("--lbug-shell",
-                        help="Path of the lbug shell executable. Defaults to the path as built in the default release build directory",
-                        default=default_lbug_exec_path)
+    shell_name = 'riag_shell' if sys.platform == "win32" else 'riag'
+    default_riag_exec_path = os.path.join(
+        base_dir, '..', 'build', default_mode, 'tools', 'shell', shell_name)
+    parser.add_argument("--riag-shell", "--lbug-shell", dest="riag_shell",
+                        help="Path of the riag shell executable. Defaults to the path as built in the default release build directory",
+                        default=default_riag_exec_path)
     args = parser.parse_args()
 
-    if args.lbug_shell == default_lbug_exec_path:
-        mode = args.lbug_shell_mode
-        if sys.platform == "win32":
-            args.lbug_shell = os.path.join(base_dir, '..', 'build', mode, 'tools', 'shell', 'lbug_shell')
-        else:
-            args.lbug_shell = os.path.join(base_dir, '..', 'build', mode, 'tools', 'shell', 'lbug')
+    if args.riag_shell == default_riag_exec_path:
+        args.riag_shell = os.path.join(base_dir, '..', 'build', args.riag_shell_mode, 'tools', 'shell',
+                                       shell_name)
 
     try:
-        serialize(args.lbug_shell, args.dataset_name, args.dataset_path, args.serialized_graph_path,
+        serialize(args.riag_shell, args.dataset_name, args.dataset_path, args.serialized_graph_path,
                   args.benchmark_copy_log_dir, args.single_thread)
     except Exception as e:
         logging.error(f'Error serializing dataset {args.dataset_name}')
